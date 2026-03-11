@@ -153,10 +153,13 @@ If you prefer to run the application directly:
 
 ```bash
 # Start the required infrastructure
-docker compose up -d postgres kafka clickhouse temporal temporal-ui
+docker compose up -d postgres kafka clickhouse temporal temporal-ui redis
 
-# Run the application locally
-go run cmd/server/main.go
+# Run the application locally in one process (default local mode)
+make run-server-local
+
+# Or mirror split deployment locally (API foreground + consumer background via Makefile)
+make run-server-split
 ```
 
 

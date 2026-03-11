@@ -263,7 +263,7 @@ customer_portal:
 
 # Redis configuration
 redis:
-  host: "localhost" # Redis server hostname
+  host: "127.0.0.1" # Redis server hostname (IPv4 avoids localhost/::1 issues in local dev)
   port: 6379 # Redis server port
   password: "" # Redis password (optional)
   db: 0 # Redis database number

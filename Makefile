@@ -49,14 +49,48 @@ up:
 down:
 	docker compose down
 
-.PHONY: run-server
+.PHONY: run-server run-server-local run-server-api run-server-consumer run-server-split run
 run-server:
 	go run cmd/server/main.go
 
-.PHONY: run-server-local
 run-server-local: run-server
 
-.PHONY: run
+run-server-api:
+	FLEXPRICE_DEPLOYMENT_MODE=api go run cmd/server/main.go
+
+run-server-consumer:
+	FLEXPRICE_DEPLOYMENT_MODE=consumer go run cmd/server/main.go
+
+# Start API in the foreground and a matching consumer in the background.
+run-server-split:
+	@set -eu; \
+	existing_consumer_pid="$$({ ps eww -Ao pid=,command= | awk '/go run cmd\/server\/main\.go/ && /FLEXPRICE_DEPLOYMENT_MODE=consumer/ && !/awk/ { print $$1; exit }'; } || true)"; \
+	if [ -n "$$existing_consumer_pid" ]; then \
+		echo "A host-local FlexPrice consumer is already running (pid $$existing_consumer_pid)."; \
+		echo "Stop it first, or keep using it and run 'make run-server-api' separately."; \
+		exit 1; \
+	fi; \
+	consumer_pid=""; \
+	cleanup() { \
+		if [ -n "$$consumer_pid" ] && kill -0 "$$consumer_pid" 2>/dev/null; then \
+			echo ""; \
+			echo "Stopping FlexPrice local consumer (pid $$consumer_pid)..."; \
+			kill "$$consumer_pid" 2>/dev/null || true; \
+			wait "$$consumer_pid" 2>/dev/null || true; \
+		fi; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	echo "Starting FlexPrice consumer in the background..."; \
+	FLEXPRICE_DEPLOYMENT_MODE=consumer go run cmd/server/main.go & \
+	consumer_pid=$$!; \
+	sleep 2; \
+	if ! kill -0 "$$consumer_pid" 2>/dev/null; then \
+		echo "FlexPrice consumer exited before the API started."; \
+		wait "$$consumer_pid"; \
+	fi; \
+	echo "Starting FlexPrice API in the foreground..."; \
+	FLEXPRICE_DEPLOYMENT_MODE=api go run cmd/server/main.go
+
 run: run-server
 
 .PHONY: test test-verbose test-coverage
@@ -171,7 +205,7 @@ clean-docker:
 # Full local setup
 .PHONY: setup-local
 setup-local: up init-db init-kafka
-	@echo "Local setup complete. You can now run 'make run-server-local' to start the server"
+	@echo "Local setup complete. You can now run 'make run-server-local' for single-process mode or 'make run-server-split' for Makefile-managed API + consumer split mode"
 
 # Clean everything and start fresh
 .PHONY: clean-start
@@ -211,7 +245,7 @@ restart-flexprice: stop-flexprice start-flexprice
 dev-setup:
 	@echo "Setting up FlexPrice development environment..."
 	@echo "Step 1: Starting infrastructure services..."
-	@docker compose up -d postgres kafka clickhouse temporal temporal-ui
+	@docker compose up -d postgres kafka clickhouse temporal temporal-ui redis
 	@echo "Step 2: Building FlexPrice application image..."
 	@make build-image
 	@echo "Step 3: Running database migrations and initializing Kafka..."

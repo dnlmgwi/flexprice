@@ -23,7 +23,7 @@ const (
 
 // RedisCache implements the Cache interface using Redis
 type RedisCache struct {
-	client *redis.ClusterClient
+	client redis.UniversalClient
 	config *config.Configuration
 }
 

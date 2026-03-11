@@ -34,7 +34,7 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
@@ -62,6 +62,26 @@ services:
         hard: 262144
     healthcheck:
       test: ["CMD", "wget", "--spider", "http://clickhouse:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7.4.7
+    ports:
+      - "127.0.0.1:6379:6379"
+    command:
+      [
+        "redis-server",
+        "--maxmemory",
+        "50mb",
+        "--maxmemory-policy",
+        "noeviction",
+        "--maxmemory-samples",
+        "10",
+      ]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -113,6 +133,30 @@ services:
     depends_on:
       - temporal
 
+  flexprice-migrate:
+    image: flexprice-app:local
+    command: ["./migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - FLEXPRICE_POSTGRES_HOST=postgres
+      - FLEXPRICE_POSTGRES_READER_HOST=postgres
+    volumes:
+      - ./internal/config:/app/internal/config
+    restart: no
+
+  flexprice-clickhouse-migrate:
+    image: clickhouse/clickhouse-server:24.9-alpine
+    entrypoint: ["/bin/sh", "/scripts/clickhouse-migrate.sh"]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    volumes:
+      - ./migrations/clickhouse:/migrations:ro
+      - ./scripts/bash/clickhouse-migrate.sh:/scripts/clickhouse-migrate.sh:ro
+    restart: no
+
   # Build stage as a separate service that other services can depend on
   flexprice-build:
     image: flexprice-app:local
@@ -134,15 +178,23 @@ services:
         condition: service_healthy
       temporal:
         condition: service_started
+      redis:
+        condition: service_healthy
+      flexprice-migrate:
+        condition: service_completed_successfully
+      flexprice-clickhouse-migrate:
+        condition: service_completed_successfully
     ports:
       - "127.0.0.1:8080:8080"
     environment:
       - FLEXPRICE_DEPLOYMENT_MODE=api
       # Override config.yaml settings for containerized environment
       - FLEXPRICE_POSTGRES_HOST=postgres
+      - FLEXPRICE_POSTGRES_READER_HOST=postgres
       - FLEXPRICE_KAFKA_BROKERS=kafka:9092
       - FLEXPRICE_CLICKHOUSE_ADDRESS=clickhouse:9000
       - FLEXPRICE_TEMPORAL_ADDRESS=temporal:7233
+      - FLEXPRICE_REDIS_HOST=redis
     volumes:
       - ./internal/config:/app/internal/config
     restart: unless-stopped
@@ -158,13 +210,21 @@ services:
         condition: service_healthy
       temporal:
         condition: service_started
+      redis:
+        condition: service_healthy
+      flexprice-migrate:
+        condition: service_completed_successfully
+      flexprice-clickhouse-migrate:
+        condition: service_completed_successfully
     environment:
       - FLEXPRICE_DEPLOYMENT_MODE=consumer
       # Override config.yaml settings for containerized environment
       - FLEXPRICE_POSTGRES_HOST=postgres
+      - FLEXPRICE_POSTGRES_READER_HOST=postgres
       - FLEXPRICE_KAFKA_BROKERS=kafka:9092
       - FLEXPRICE_CLICKHOUSE_ADDRESS=clickhouse:9000
       - FLEXPRICE_TEMPORAL_ADDRESS=temporal:7233
+      - FLEXPRICE_REDIS_HOST=redis
     volumes:
       - ./internal/config:/app/internal/config
     restart: unless-stopped
@@ -180,13 +240,21 @@ services:
         condition: service_healthy
       temporal:
         condition: service_started
+      redis:
+        condition: service_healthy
+      flexprice-migrate:
+        condition: service_completed_successfully
+      flexprice-clickhouse-migrate:
+        condition: service_completed_successfully
     environment:
       - FLEXPRICE_DEPLOYMENT_MODE=temporal_worker
       # Override config.yaml settings for containerized environment
       - FLEXPRICE_POSTGRES_HOST=postgres
+      - FLEXPRICE_POSTGRES_READER_HOST=postgres
       - FLEXPRICE_KAFKA_BROKERS=kafka:9092
       - FLEXPRICE_CLICKHOUSE_ADDRESS=clickhouse:9000
       - FLEXPRICE_TEMPORAL_ADDRESS=temporal:7233
+      - FLEXPRICE_REDIS_HOST=redis
     volumes:
       - ./internal/config:/app/internal/config
     restart: unless-stopped
