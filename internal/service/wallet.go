@@ -9,6 +9,7 @@ import (
 
 	"github.com/flexprice/flexprice/internal/api/dto"
 	"github.com/flexprice/flexprice/internal/cache"
+	"github.com/flexprice/flexprice/internal/domain/events"
 	"github.com/flexprice/flexprice/internal/domain/subscription"
 	"github.com/flexprice/flexprice/internal/domain/wallet"
 	ierr "github.com/flexprice/flexprice/internal/errors"
@@ -93,7 +94,7 @@ type WalletService interface {
 	// TopUpWalletForProratedCharge tops up a wallet for proration credits from subscription changes.
 	// idempotencyKey should be a stable string derived from the change (e.g. lineItemID + effectiveDate)
 	// to prevent duplicate credits on retries.
-	TopUpWalletForProratedCharge(ctx context.Context, customerID string, amount decimal.Decimal, currency string, idempotencyKey string) error
+	TopUpWalletForProratedCharge(ctx context.Context, customerID string, amount decimal.Decimal, currency string, idempotencyKey string) (*dto.WalletTransactionResponse, error)
 
 	// CompletePurchasedCreditTransaction completes a pending wallet transaction when payment succeeds
 	CompletePurchasedCreditTransactionWithRetry(ctx context.Context, walletTransactionID string) error
@@ -2220,15 +2221,15 @@ func (s *walletService) CheckBalanceThresholds(ctx context.Context, w *wallet.Wa
 	return nil
 }
 
-func (s *walletService) TopUpWalletForProratedCharge(ctx context.Context, customerID string, amount decimal.Decimal, currency string, idempotencyKey string) error {
+func (s *walletService) TopUpWalletForProratedCharge(ctx context.Context, customerID string, amount decimal.Decimal, currency string, idempotencyKey string) (*dto.WalletTransactionResponse, error) {
 	if customerID == "" {
-		return ierr.NewError("customer_id is required").
+		return nil, ierr.NewError("customer_id is required").
 			WithHint("Customer ID is required for wallet top-up").
 			Mark(ierr.ErrValidation)
 	}
 
 	if amount.LessThanOrEqual(decimal.Zero) {
-		return ierr.NewError("amount must be positive").
+		return nil, ierr.NewError("amount must be positive").
 			WithHint("Top-up amount must be greater than zero").
 			Mark(ierr.ErrValidation)
 	}
@@ -2240,7 +2241,7 @@ func (s *walletService) TopUpWalletForProratedCharge(ctx context.Context, custom
 	// Get customer to validate existence
 	_, err := s.CustomerRepo.Get(ctx, customerID)
 	if err != nil {
-		return ierr.WithError(err).
+		return nil, ierr.WithError(err).
 			WithHint("Failed to get customer").
 			WithReportableDetails(map[string]interface{}{
 				"customer_id": customerID,
@@ -2251,7 +2252,7 @@ func (s *walletService) TopUpWalletForProratedCharge(ctx context.Context, custom
 	// Get existing wallets for the customer
 	existingWallets, err := s.GetWalletsByCustomerID(ctx, customerID)
 	if err != nil {
-		return ierr.WithError(err).
+		return nil, ierr.WithError(err).
 			WithHint("Failed to get existing wallets").
 			WithReportableDetails(map[string]interface{}{
 				"customer_id": customerID,
@@ -2292,7 +2293,7 @@ func (s *walletService) TopUpWalletForProratedCharge(ctx context.Context, custom
 
 		selectedWallet, err = s.CreateWallet(ctx, walletReq)
 		if err != nil {
-			return ierr.WithError(err).
+			return nil, ierr.WithError(err).
 				WithHint("Failed to create wallet for proration credit").
 				WithReportableDetails(map[string]interface{}{
 					"customer_id": customerID,
@@ -2314,9 +2315,9 @@ func (s *walletService) TopUpWalletForProratedCharge(ctx context.Context, custom
 		IdempotencyKey: lo.ToPtr(idempotencyKey),
 	}
 
-	_, err = s.TopUpWallet(ctx, selectedWallet.ID, topUpReq)
+	topUpResp, err := s.TopUpWallet(ctx, selectedWallet.ID, topUpReq)
 	if err != nil {
-		return ierr.WithError(err).
+		return nil, ierr.WithError(err).
 			WithHint("Failed to top up wallet with proration credit").
 			WithReportableDetails(map[string]interface{}{
 				"customer_id": customerID,
@@ -2332,7 +2333,13 @@ func (s *walletService) TopUpWalletForProratedCharge(ctx context.Context, custom
 		"amount", amount.String(),
 		"currency", currency)
 
-	return nil
+	if topUpResp == nil || topUpResp.WalletTransaction == nil {
+		return nil, ierr.NewError("wallet top-up returned no transaction").
+			WithHint("Proration credit was applied but transaction details are missing").
+			Mark(ierr.ErrInternal)
+	}
+
+	return topUpResp.WalletTransaction, nil
 }
 
 func (s *walletService) GetWalletBalanceV2(ctx context.Context, walletID string) (*dto.WalletBalanceResponse, error) {
@@ -2419,6 +2426,7 @@ func (s *walletService) GetWalletBalanceV2(ctx context.Context, walletID string)
 			if err != nil {
 				return nil, err
 			}
+			// s.publishBenchmarkEvent(ctx, sub.ID, periodStart, periodEnd)
 
 			// Calculate usage charges for feature usage data
 			usageCharges, usageTotal, err := billingService.CalculateFeatureUsageCharges(ctx, sub, usage, periodStart, periodEnd, nil)
@@ -2586,7 +2594,9 @@ func (s *walletService) GetWalletBalanceFromCache(ctx context.Context, walletID 
 			})
 			if err != nil {
 				return nil, err
-			} // Calculate usage charges for feature usage data
+			}
+			// s.publishBenchmarkEvent(ctx, sub.ID, periodStart, periodEnd)
+			// Calculate usage charges for feature usage data
 			usageCharges, usageTotal, err := billingService.CalculateFeatureUsageCharges(ctx, sub, usage, periodStart, periodEnd, nil)
 			if err != nil {
 				return nil, err
@@ -3186,4 +3196,23 @@ func (s *walletService) getWalletRealtimeBalanceFromCache(ctx context.Context, w
 	}
 
 	return balance
+}
+
+// publishBenchmarkEvent publishes a usage benchmark event to Kafka.
+// Fire-and-forget: errors are logged but never returned to the caller.
+func (s *walletService) publishBenchmarkEvent(ctx context.Context, subscriptionID string, startTime, endTime time.Time) {
+	benchSvc := NewUsageBenchmarkService(s.ServiceParams, nil)
+	evt := &events.UsageBenchmarkEvent{
+		SubscriptionID: subscriptionID,
+		StartTime:      startTime,
+		EndTime:        endTime,
+		TenantID:       types.GetTenantID(ctx),
+		EnvironmentID:  types.GetEnvironmentID(ctx),
+	}
+	if err := benchSvc.PublishEvent(ctx, evt); err != nil {
+		s.Logger.WarnwCtx(ctx, "usage benchmark: failed to publish event",
+			"subscription_id", subscriptionID,
+			"error", err,
+		)
+	}
 }

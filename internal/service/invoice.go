@@ -993,7 +993,7 @@ func (s *invoiceService) IsFinalizationDue(ctx context.Context, invoiceID string
 		return false, nil
 	}
 
-	if inv.LastComputedAt != nil && inv.LastComputedAt.Before(*inv.PeriodEnd) && inv.BillingReason == string(types.InvoiceBillingReasonSubscriptionCycle) {
+	if inv.LastComputedAt != nil && inv.PeriodEnd != nil && inv.LastComputedAt.Before(*inv.PeriodEnd) && inv.BillingReason == string(types.InvoiceBillingReasonSubscriptionCycle) {
 		return false, nil
 	}
 
@@ -2011,6 +2011,18 @@ func (s *invoiceService) GetCustomerInvoiceSummary(ctx context.Context, customer
 		return nil, err
 	}
 
+	filter.CustomerID = "" // clear customer id to get all invoices
+	filter.SubscriptionCustomerIDs = []string{customerID}
+	invoicesInvoicedToParent, err := s.ListInvoices(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	merged := append(invoicesResp.Items, invoicesInvoicedToParent.Items...)
+	// The same invoice can match both direct CustomerID and SubscriptionCustomerIDs (e.g. parent
+	// billing); count each invoice once.
+	mergedInvoices := lo.UniqBy(merged, func(inv *dto.InvoiceResponse) string { return inv.ID })
+
 	summary := &dto.CustomerInvoiceSummary{
 		CustomerID:          customerID,
 		Currency:            currency,
@@ -2027,7 +2039,7 @@ func (s *invoiceService) GetCustomerInvoiceSummary(ctx context.Context, customer
 	now := time.Now().UTC()
 
 	// Process each invoice
-	for _, inv := range invoicesResp.Items {
+	for _, inv := range mergedInvoices {
 		// Skip invoices with different currency
 		if !types.IsMatchingCurrency(inv.Currency, currency) {
 			continue
