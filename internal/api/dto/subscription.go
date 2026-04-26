@@ -418,13 +418,24 @@ type AddAddonRequest struct {
 
 // RemoveAddonRequest is used by body-based endpoint /subscriptions/addon (DELETE)
 type RemoveAddonRequest struct {
-	AddonAssociationID string `json:"addon_association_id" validate:"required"`
-	Reason             string `json:"reason,omitempty"`
+	AddonAssociationID string                  `json:"addon_association_id" validate:"required"`
+	Reason             string                  `json:"reason,omitempty"`
+	ProrationBehavior  types.ProrationBehavior `json:"proration_behavior,omitempty"`
+	// EffectiveDate is the date the cancellation takes effect.
+	// When nil the addon is cancelled at the end of the current period.
+	// When provided it must fall within [CurrentPeriodStart, CurrentPeriodEnd]; mid-period
+	// values combined with create_prorations will issue a wallet credit for unused time.
+	EffectiveDate *time.Time `json:"effective_date,omitempty"`
 }
 
 func (r *RemoveAddonRequest) Validate() error {
 	if err := validator.ValidateRequest(r); err != nil {
 		return err
+	}
+	if r.ProrationBehavior != "" {
+		if err := r.ProrationBehavior.Validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -638,18 +649,6 @@ func (r *CreateSubscriptionRequest) Validate() error {
 			Mark(ierr.ErrValidation)
 	}
 
-	if r.BillingAnchor != nil {
-		if r.BillingAnchor.Before(lo.FromPtr(r.StartDate)) {
-			return ierr.NewError("billing_anchor cannot be before start_date").
-				WithHint("billing_anchor must be on or after start_date").
-				WithReportableDetails(map[string]any{
-					"billing_anchor": r.BillingAnchor,
-					"start_date":     r.StartDate,
-				}).
-				Mark(ierr.ErrValidation)
-		}
-	}
-
 	// Handle legacy collection method conversion and validation
 	if r.CollectionMethod != nil {
 		// Handle legacy default_incomplete collection method
@@ -757,15 +756,6 @@ func (r *CreateSubscriptionRequest) Validate() error {
 	if r.PlanID == "" {
 		return ierr.NewError("plan_id is required").
 			WithHint("Plan ID is required").
-			Mark(ierr.ErrValidation)
-	}
-
-	if r.StartDate != nil && r.StartDate.After(time.Now().UTC()) {
-		return ierr.NewError("start_date cannot be in the future").
-			WithHint("Start date must be in the past or present").
-			WithReportableDetails(map[string]interface{}{
-				"start_date": *r.StartDate,
-			}).
 			Mark(ierr.ErrValidation)
 	}
 
